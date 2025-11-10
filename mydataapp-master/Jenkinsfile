@@ -8,15 +8,24 @@ pipeline {
             }
         }
 
+        stage('Diagnostics') {
+            steps {
+                sh 'whoami'
+                sh 'pwd'
+                sh 'echo "WORKSPACE = ${WORKSPACE}"'
+                sh 'ls -la /var/lib/jenkins/'
+            }
+        }
+        
         stage('Copy Files to Directory') {
             steps {
                 sh '''
                     # Создаем целевую директорию, если её нет
-                    mkdir -p /home/levik/jenkins/a_data
+                    mkdir -p ${WORKSPACE}/a_data
                     # Копируем содержимое workspace рекурсивно
-                    cp -R ./mydataapp-master/* /home/levik/jenkins/a_data
+                    cp -R ./mydataapp-master/* ${WORKSPACE}/a_data
                     # Или используем rsync для более гибкого копирования
-                    # rsync -av --delete ./ /home/levik/jenkins/a_data
+                    # rsync -av --delete ./ ${WORKSPACE}/a_data
                 '''
             }
         }        
@@ -38,7 +47,7 @@ pipeline {
             steps {
                 script {
                     echo "🔨 Сборка образа фронтенда..."
-                    dir('/home/levik/jenkins/a_data/frontend-app') {
+                    dir('${WORKSPACE}/a_data/frontend-app') {
                         // Сборка образа внутри Minikube environment :cite[1]
                         sh 'minikube image build -t frontend-app_frontend:latest .'
                     }
@@ -51,7 +60,7 @@ pipeline {
             steps {
                 script {
                     echo "🔨 Сборка образа бэкенда..."
-                    dir('/home/levik/jenkins/a_data/postgres-java-app') {
+                    dir('${WORKSPACE}/a_data/postgres-java-app') {
                         // --overwrite=true позволяет перезаписать существующий образ :cite[1]
                         sh 'minikube image build -t postgres-java-app_app:latest .'
                     }
@@ -85,7 +94,7 @@ pipeline {
             steps {
                 script {
                     echo "🚀 Применение Kubernetes манифестов..."
-                    dir('/home/levik/jenkins/a_data/k8s') {
+                    dir('${WORKSPACE}/a_data/k8s') {
                         // Сначала применяем namespace, так как от него зависят другие ресурсы
                         sh 'kubectl apply -f mydataapp-namespace.yaml'
                         
