@@ -1,0 +1,2 @@
+# mydataapp
+# pet project minikube
