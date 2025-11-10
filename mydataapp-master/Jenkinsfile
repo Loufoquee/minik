@@ -21,7 +21,6 @@ pipeline {
             steps {
                 sh '''
                     mkdir -p ${WORKSPACE}/a_data
-                    # Копируем все содержимое текущей директории
                     cp -R . ${WORKSPACE}/a_data/ || true
                     echo "Содержимое скопировано в ${WORKSPACE}/a_data"
                     ls -la ${WORKSPACE}/a_data/
@@ -33,7 +32,6 @@ pipeline {
             steps {
                 script {
                     echo "🔧 Проверка доступа к Docker..."
-                    // Проверяем доступ к Docker перед запуском Minikube
                     def dockerAccess = sh(script: 'docker version', returnStatus: true)
                     if (dockerAccess != 0) {
                         error "❌ Docker не доступен. Добавьте пользователя jenkins в группу docker: sudo usermod -aG docker jenkins && sudo systemctl restart jenkins"
@@ -48,17 +46,13 @@ pipeline {
             steps {
                 script {
                     echo "🚀 Запуск Minikube с драйвером Docker..."
-                    // Удаляем существующий кластер если есть
                     sh 'minikube delete || true'
-                    // Запускаем синхронно и ждем завершения
                     sh 'minikube start --driver=docker --force'
                     echo "✅ Minikube успешно запущен"
                     
-                    // Проверяем статус
                     sh 'minikube status'
                     sh 'kubectl cluster-info'
                     
-                    // Ждем полной готовности
                     sleep time: 30, unit: 'SECONDS'
                 }
             }
@@ -68,11 +62,8 @@ pipeline {
             steps {
                 script {
                     echo "🔨 Сборка образа фронтенда..."
-                    // ИСПРАВЛЕНО: убраны одинарные кавычки вокруг ${WORKSPACE}
                     dir("${WORKSPACE}/a_data/mydataapp-master/frontend-app") {
-                        // Сначала собираем обычным docker build
                         sh 'docker build -t frontend-app_frontend:latest .'
-                        // Затем загружаем в Minikube
                         sh 'minikube image load frontend-app_frontend:latest'
                     }
                     echo "✅ Образ фронтенда успешно собран и загружен."
@@ -84,7 +75,6 @@ pipeline {
             steps {
                 script {
                     echo "🔨 Сборка образа бэкенда..."
-                    // ИСПРАВЛЕНО: убраны одинарные кавычки вокруг ${WORKSPACE}
                     dir("${WORKSPACE}/a_data/mydataapp-master/postgres-java-app") {
                         sh 'docker build -t postgres-java-app_app:latest .'
                         sh 'minikube image load postgres-java-app_app:latest'
@@ -98,34 +88,59 @@ pipeline {
             steps {
                 script {
                     echo "🚀 Применение Kubernetes манифестов..."
-                    // ИСПРАВЛЕНО: убраны одинарные кавычки вокруг ${WORKSPACE}
                     dir("${WORKSPACE}/a_data/mydataapp-master/k8s") {
-                        // Применяем все манифесты
-                        sh 'kubectl apply -f .'
+                        // Сначала применяем namespace и ждем его создания
+                        sh 'kubectl apply -f mydataapp-namespace.yaml'
+                        echo "⏳ Ожидание создания namespace..."
+                        sh 'kubectl wait --for=jsonpath=\'{.status.phase}\'=Active namespace/mydataapp --timeout=60s'
+                        
+                        // Затем применяем остальные манифесты в правильном порядке
+                        sh 'kubectl apply -f postgres-secret.yaml'
+                        sh 'kubectl apply -f postgres-pvc.yaml'
+                        sh 'kubectl apply -f postgres-deployment.yaml'
+                        sh 'kubectl apply -f postgres-service.yaml'
+                        
+                        // Ждем готовности Postgres PVC и Pod
+                        echo "⏳ Ожидание готовности Postgres PVC..."
+                        sh 'kubectl wait --for=jsonpath=\'{.status.phase}\'=Bound pvc/postgres-pvc -n mydataapp --timeout=120s'
+                        echo "⏳ Ожидание запуска Postgres..."
+                        sh 'kubectl wait --for=condition=Ready pod -l app=postgres -n mydataapp --timeout=120s'
+                        
+                        // Применяем остальные манифесты
+                        sh 'kubectl apply -f backend-configmap.yaml'
+                        sh 'kubectl apply -f backend-deployment.yaml'
+                        sh 'kubectl apply -f backend-service.yaml'
+                        sh 'kubectl apply -f frontend-deployment.yaml'
+                        sh 'kubectl apply -f frontend-service.yaml'
+                        sh 'kubectl apply -f mydataapp-ingress.yaml'
                     }
                     echo "✅ Все манифесты успешно применены."
-                    
-                    // Проверяем созданные ресурсы
-                    sh 'kubectl get pods -n mydataapp'
-                    sh 'kubectl get services -n mydataapp'
                 }
             }
         }
         
-        stage('Wait for Pods Ready') {
+        stage('Wait for Application Ready') {
             steps {
                 script {
-                    echo "⏳ Ожидание готовности подов..."
-                    // Ждем пока все поды будут готовы
+                    echo "⏳ Ожидание готовности приложения..."
+                    // Ждем готовности всех подов
                     sh '''
-                        timeout 300s bash -c \
-                        "until kubectl get pods -n mydataapp --no-headers | grep -v Running | grep -v Completed > /dev/null; do \
-                            echo 'Ждем готовности подов...'; \
-                            kubectl get pods -n mydataapp; \
-                            sleep 10; \
-                        done"
+                        kubectl wait --for=condition=Ready pod -l app=backend -n mydataapp --timeout=180s
+                        kubectl wait --for=condition=Ready pod -l app=frontend -n mydataapp --timeout=180s
                     '''
-                    echo "✅ Все поды готовы"
+                    
+                    // Проверяем статус всех ресурсов
+                    sh '''
+                        echo "=== Pods Status ==="
+                        kubectl get pods -n mydataapp -o wide
+                        echo "=== Services Status ==="
+                        kubectl get services -n mydataapp
+                        echo "=== PVC Status ==="
+                        kubectl get pvc -n mydataapp
+                        echo "=== Ingress Status ==="
+                        kubectl get ingress -n mydataapp
+                    '''
+                    echo "✅ Приложение готово к работе."
                 }
             }
         }
@@ -134,16 +149,19 @@ pipeline {
             steps {
                 script {
                     echo "🔗 Запуск Minikube dashboard..."
-                    // Запускаем dashboard в фоне
                     sh 'nohup minikube dashboard --url > /tmp/minikube-dashboard.log 2>&1 &'
                     sleep time: 10, unit: 'SECONDS'
                     
-                    // Получаем URL dashboard
+                    // Получаем URL сервисов для тестирования
+                    sh '''
+                        echo "=== Frontend Service URL ==="
+                        minikube service frontend-service -n mydataapp --url || true
+                        echo "=== Backend Service URL ==="
+                        minikube service backend-service -n mydataapp --url || true
+                    '''
+                    
                     sh 'minikube dashboard --url || true'
                     echo "✅ Minikube dashboard запущен"
-                    
-                    // Показываем информацию о сервисах
-                    sh 'minikube service list -n mydataapp'
                 }
             }
         }    
@@ -153,14 +171,17 @@ pipeline {
     post {
         always {
             echo "📝 Pipeline завершен. Детали можно проверить в логах выше."
-            // Сохраняем логи для диагностики
             sh '''
-                echo "=== Minikube Status ==="
+                echo "=== Final Minikube Status ==="
                 minikube status || true
-                echo "=== Kubernetes Pods ==="
+                echo "=== Final Kubernetes Pods ==="
                 kubectl get pods -A || true
-                echo "=== Kubernetes Services ==="
+                echo "=== Final Kubernetes Services ==="
                 kubectl get services -A || true
+                echo "=== Pods Logs ==="
+                kubectl logs -l app=postgres -n mydataapp --tail=50 || true
+                kubectl logs -l app=backend -n mydataapp --tail=50 || true
+                kubectl logs -l app=frontend -n mydataapp --tail=50 || true
             '''
         }
         success {
@@ -170,12 +191,13 @@ pipeline {
         }
         failure {
             echo "❌ Pipeline завершился с ошибкой. Проверьте логи для диагностики."
-            // Сохраняем дополнительные логи при ошибке
             sh '''
                 echo "=== Pods Details ==="
                 kubectl describe pods -n mydataapp || true
-                echo "=== Services Details ==="
-                kubectl describe services -n mydataapp || true
+                echo "=== PVC Details ==="
+                kubectl describe pvc -n mydataapp || true
+                echo "=== Events ==="
+                kubectl get events -n mydataapp --sort-by='.lastTimestamp' || true
             '''
         }
     }
